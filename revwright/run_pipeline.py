@@ -104,3 +104,10 @@ for target, (oitems, ohdr) in oracle_items.items():
     print(target, stage)
 (ROOT / "pipeline_matrix.json").write_text(json.dumps(results, indent=1))
 print("wrote pipeline_matrix.json")
+# every stage lands in the stage database (owner order, 2026-10-30)
+import stage_db
+for target, stage in results.items():
+    stage_db.record_run(target, "pipeline-v0.5", "auto_context",
+                        stage.get("with_ops", stage.get("base_latest")),
+                        source="run_pipeline")
+print("recorded run into data/stage_scores.db")
