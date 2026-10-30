@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RevWright stage database — every stage, per file, % by version|method.
+"""RevWright stage database (v2: role-split corpora + kind-categorized pointer index) — every stage, per file, % by version|method.
 
 SQLite store (data/stage_scores.db). One row per measurement:
   file | stage_version | method | item (WHOLE or class/def) | pct | source
@@ -9,12 +9,24 @@ append via record_run(). Scores are corpus-relative (L7)."""
 import sqlite3, sys
 from pathlib import Path
 
-DB = Path(__file__).resolve().parent.parent / "data" / "stage_scores.db"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DB = DATA_DIR / "stage_scores.db"  # combined corpus (default)
+
+def db_for(corpus):
+    """Owner role-split (2026-10-30): assistant = reconstruction TARGET,
+    user = separate database, combined = union results|methods."""
+    if corpus == "combined":
+        return DB
+    return DATA_DIR / f"stage_scores_{corpus}.db"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS stage_scores (
   file TEXT NOT NULL, stage_version TEXT NOT NULL, method TEXT NOT NULL,
   item TEXT NOT NULL, pct REAL, source TEXT,
   PRIMARY KEY (file, stage_version, method, item));
+CREATE TABLE IF NOT EXISTS pointer_index (
+  content_hash TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+  class_context TEXT, file_hint TEXT, session TEXT, msg TEXT, channel TEXT,
+  PRIMARY KEY (content_hash, kind, name, session, msg, channel));
 """
 
 # Backfill: only numbers actually measured and published (REBUILD-001..005,
@@ -84,7 +96,7 @@ def connect(db_path=DB):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
-    con.execute(SCHEMA)
+    con.executescript(SCHEMA)
     return con
 
 def record(con, rows):
@@ -92,8 +104,15 @@ def record(con, rows):
         "INSERT OR REPLACE INTO stage_scores VALUES (?,?,?,?,?,?)", rows)
     con.commit()
 
-def record_run(file, stage_version, method, whole_pct, per_item=None, source="run_pipeline"):
-    con = connect()
+def record_index(rows, db_path=DB):
+    """rows: (content_hash, kind, name, class_context, file_hint, session, msg, channel).
+    kind categories: class | fn | method (owner order: the index holds kinds)."""
+    con = connect(db_path)
+    con.executemany("INSERT OR REPLACE INTO pointer_index VALUES (?,?,?,?,?,?,?,?)", rows)
+    con.commit(); con.close()
+
+def record_run(file, stage_version, method, whole_pct, per_item=None, source="run_pipeline", db_path=DB):
+    con = connect(db_path)
     rows = [(file, stage_version, method, "WHOLE", whole_pct, source)]
     for item, pct in (per_item or {}).items():
         rows.append((file, stage_version, method, item, pct, source))
