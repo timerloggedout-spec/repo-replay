@@ -1,5 +1,10 @@
 # replay-store/v1 — spec (draft, name/version changeable)
 
+Engine: **RevWright** — the index->file write/construction/refactor/REconstruction
+engine (module `revwright`). Name is a temporary decision, like every decision
+in this project: up for revision|review for goal progress.
+Signal channel: see `SIGNAL.md` (signal/v1).
+
 ## object/v1
 {"hash": "sha256[:16]", "content_ref": "objects/<hash>.json",
  "provenance": {"session_id": "uuid", "msg_idx": 0, "blk_idx": 0,
