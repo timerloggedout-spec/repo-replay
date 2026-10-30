@@ -1,5 +1,7 @@
 # Exported methods — imported by timerloggedout-spec/termux-monorepo
 
+Engine: **RevWright** (`revwright`) — implements the methods below.
+
 Monorepo imports these *methods* (by reference to this repo + version);
 it does not copy the implementation. Clear distinction: this repo owns the
 system; the monorepo is a consumer + test subject.
