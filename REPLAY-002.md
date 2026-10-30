@@ -15,5 +15,9 @@ Implications (model update):
    pointer-recipe = base-ref + ordered fragment ops, as SPEC already allows.
 2. Block classification (snapshot|fragment|dump|discussion) is a required
    extractor stage BEFORE compose; size + parse + anchor tests derived here.
-3. `files` metadata scan: 0 non-empty across all harvested entries — no
-   attachment channel in this corpus (checked, ∅).
+3. `files` metadata scan: **44 entries** carry non-empty files metadata
+   (platform file ids + names, e.g. `test.txt`, a DeepSeek-web export) —
+   attachment POINTERS exist; the content bytes are not in the export
+   (platform-side storage), so not a local fill channel, but the pointers
+   belong in the index. (Erratum: first publish of this report said 0 —
+   the same-run scan said 44; corrected here.)
