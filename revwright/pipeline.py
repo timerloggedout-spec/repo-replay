@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RevWright pipeline v0.4 — generalized rebuild automation.
+"""RevWright pipeline v0.5 — generalized rebuild automation.
 
 Lessons codified from the per-file calibration passes (REBUILD-001..005):
  L1 channels before fences: heredocs are extracted from RAW content
@@ -196,6 +196,67 @@ def composite_op(name, method_order, method_pool):
         parts.append(src)
         used[m] = prov
     return "\n\n".join(parts) + "\n", used, gaps
+
+def reindent(src, base=4):
+    """Normalize a def/class segment: head at `base` indent, body keeps
+    its relative indentation. Returns None if it cannot be made to parse
+    (wrapped in a dummy class when base > 0)."""
+    lines = src.split("\n")
+    if not lines:
+        return None
+    head_indent = len(lines[0]) - len(lines[0].lstrip())
+    out = [" " * base + lines[0].lstrip()]
+    for l in lines[1:]:
+        if not l.strip():
+            out.append("")
+        else:
+            ind = len(l) - len(l.lstrip())
+            out.append(" " * max(base, base + ind - head_indent - 4 if head_indent else base + ind) + l.lstrip() if False else " " * (base + max(0, ind - head_indent - (4 if head_indent >= 4 else 0))) + l.lstrip())
+    text = "\n".join(out)
+    probe = ("class _Probe:\n" + text) if base else text
+    try:
+        ast.parse(probe)
+        return text
+    except Exception:
+        return None
+
+def context_segments(text):
+    """L11: attribute method segments to the nearest preceding class
+    header. Phase-tolerant: headers may be clipped by cell drift
+    (`s MessageIndex:` for `class MessageIndex:`) or sit mid-line.
+    Returns {(class_name | None, def_name): source} with defs normalized
+    to a 4-space base when they parse, raw otherwise."""
+    lines = text.split("\n")
+    events = []  # (line_idx, kind, name)
+    for i, l in enumerate(lines):
+        m = re.search(r"class\s+(\w+)\s*:", l) or re.match(r"^\s{0,10}s\s+([A-Z]\w*)\s*:", l)
+        if m:
+            events.append((i, "class", m.group(1)))
+            continue
+        m = re.search(r"(?:async\s+def|def)\s+(\w+)\s*\(", l)
+        if m:
+            events.append((i, "def", m.group(1)))
+    out = {}
+    current_class = None
+    for k, (i, kind, name) in enumerate(events):
+        if kind == "class":
+            current_class = name
+            continue
+        j = events[k + 1][0] if k + 1 < len(events) else len(lines)
+        seg_lines = [l for l in lines[i:j] if "❯" not in l]
+        while seg_lines and not seg_lines[-1].strip():
+            seg_lines.pop()
+        if not seg_lines:
+            continue
+        indents = [len(l) - len(l.lstrip()) for l in seg_lines if l.strip()]
+        base = min(indents) if indents else 0
+        norm = ["    " + seg_lines[0].lstrip()] + [
+            ("    " + l[base:]) if l.strip() else "" for l in seg_lines[1:]]
+        src = "\n".join(norm)
+        key = (current_class, name)
+        if key not in out:
+            out[key] = src
+    return out
 
 def iter_messages(store_dir):
     seen = set()
