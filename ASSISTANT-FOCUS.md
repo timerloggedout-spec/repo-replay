@@ -14,9 +14,11 @@ other stages unchanged. Recorded in the assistant DB
 ## Read
 The 4 missing defs (_log_retry, continue_response, send_message_working,
 chat_completion) WERE present assistant-side — as solo blocks the >=2
-rule discarded. Presence recovered; fidelity is the remaining problem:
-whole-file gain is only +0.8, so the recovered copies are drifted
-drafts, not finals (per-def % in the assistant DB). synthegration +3.8
-from the same relaxation. Attribution threshold is therefore a real
-pipeline stage (L12): admission >=1, with fidelity handled by
-latest-order + validator selection, not by exclusion.
+rule discarded. ERRATUM (per-def %, assistant DB): _log_retry 98.5,
+continue_response 99.9, send_message_working 100.0 — near-final, NOT
+drifted; only chat_completion is drifted (23.9). Whole-file gain is
+still only +0.8, so the remaining bottleneck is composition/order at
+file level, not def fidelity. synthegration +3.8 from the same
+relaxation. Attribution threshold is therefore a real pipeline stage
+(L12): admission >=1, with fidelity handled by latest-order +
+validator selection, not by exclusion.
