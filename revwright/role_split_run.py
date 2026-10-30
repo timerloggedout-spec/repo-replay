@@ -12,7 +12,7 @@ ORACLES = {
 }
 CORPORA = {"assistant": {"ASSISTANT"}, "user": {"USER"}, "combined": None}
 
-def compose_for_target(target, oracle_path, roles):
+def compose_for_target(target, oracle_path, roles, attn_min=2):
     otext = oracle_path.read_text(errors="replace")
     oitems, ohdr = P.top_items(otext)
     omethods = P.method_items(otext)
@@ -26,7 +26,7 @@ def compose_for_target(target, oracle_path, roles):
             items, _ = P.items_of(text)
             if not items:
                 continue
-            if not ((hint and hint.endswith(base)) or len([n for n in items if n in oitems]) >= 2):
+            if not ((hint and hint.endswith(base)) or len([n for n in items if n in oitems]) >= attn_min):
                 continue
             if channel == "validation_snapshot":
                 continue
