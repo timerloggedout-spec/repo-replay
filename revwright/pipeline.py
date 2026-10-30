@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RevWright pipeline v0.3 — generalized rebuild automation.
+"""RevWright pipeline v0.4 — generalized rebuild automation.
 
 Lessons codified from the per-file calibration passes (REBUILD-001..005):
  L1 channels before fences: heredocs are extracted from RAW content
@@ -24,6 +24,16 @@ Lessons codified from the per-file calibration passes (REBUILD-001..005):
     + SOURCE-MAP.md on master) is a surviving slice of that origin issue.
     (Proven: _session_cache_key, 0 mentions corpus-wide => cause UNRESOLVED,
     NOT "written on-device only".)
+ L8 hints are untrusted input: File:/path hints include template junk
+    (`{target_file}`, `$target"`) — sanitize or the census fills with noise.
+ L9 fixed-width cell pastes: terminal transcripts flattened into giant
+    single lines of W-char padded cells (one cell = one output line).
+    De-format by searching (offset, W) that maximizes AST parse + item
+    count. Proven on 0efb156b msg21: a full sibling copy of
+    synthegration_index.py (compression_sandbox) hides in this format.
+ L10 ops are proposed, validators select: rename/composite ops are
+    generated blind from pools; the validator (V1 master in tests)
+    scores candidates — proposal and selection stay separate stages.
 """
 import json, re, ast, difflib, hashlib
 from pathlib import Path
@@ -42,6 +52,10 @@ def norm_target(p):
     p = p.strip().strip('`')
     p = re.sub(r"^~?/", "", p)
     p = re.sub(r"^home/[^/]+/", "", p)
+    if any(c in p for c in '{}$"\' ') or '..' in p:
+        return None  # L8: template/placeholder junk is not a target
+    if not re.match(r"^[\w.\-/]+$", p) or ('.' not in p and '/' not in p):
+        return None
     return p
 
 def channels(content):
@@ -56,6 +70,14 @@ def channels(content):
             out.append(("validation_snapshot", norm_target(parts[i]), body))
     marks = FILEMARK.findall(content)
     hint = norm_target(marks[0]) if marks else None
+    for blob in content.split("\n"):
+        if len(blob) > 2000 and "cat " in blob:
+            starts = list(re.finditer(r"❯\s*cat\s+(\S+)", blob))
+            for k, m in enumerate(starts):
+                end = starts[k + 1].start() if k + 1 < len(starts) else len(blob)
+                text = deformat_cells(blob[m.end():end])
+                if text:
+                    out.append(("cell_dump", norm_target(m.group(1)), text))
     for lang, code in FENCE.findall(content):
         out.append(("fence", hint, code))
     out.append(("raw", hint, content))
@@ -111,6 +133,69 @@ def items_of(text):
     if got:
         return got, hdr
     return segment_items(text), ""
+
+_DEFORMAT_CACHE = {}
+
+def deformat_cells(blob):
+    """L9: recover line-structured text from fixed-width padded cells.
+    Two-phase: cheap boundary score over (w, offset), then full segment
+    extraction only for the best candidates. Memoized by blob hash."""
+    import hashlib as _h
+    key = _h.sha256(blob.encode()).hexdigest()
+    if key in _DEFORMAT_CACHE:
+        return _DEFORMAT_CACHE[key]
+    cands = []
+    for w in range(30, 101):
+        for off in range(0, w):
+            cells = [blob[i:i + w].rstrip() for i in range(off, len(blob), w)]
+            text = "\n".join(cells)
+            cheap = sum(1 for l in cells if DEFSTART.match(l) or l.startswith(("import ", "from ", "#")))
+            cands.append((cheap, w, off, text))
+    cands.sort(key=lambda x: -x[0])
+    best = None
+    for cheap, w, off, text in cands[:3]:
+        n = len(segment_items(text))
+        whole, _ = top_items(text)
+        score = (n + 3 * len(whole), n)
+        if best is None or score > best[0]:
+            best = (score, text)
+    result = best[1] if best and best[0][0] > 0 else None
+    _DEFORMAT_CACHE[key] = result
+    return result
+
+def method_items(src):
+    """{class: {method: source}} from a parseable source."""
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        return {}
+    lines = src.split("\n")
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            out[node.name] = {
+                ch.name: "\n".join(lines[ch.lineno - 1:ch.end_lineno])
+                for ch in node.body
+                if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return out
+
+def rename_op(donor_src, new_name):
+    """L10: rename a class declaration; body untouched."""
+    return re.sub(r"class\s+\w+", f"class {new_name}", donor_src, count=1)
+
+def composite_op(name, method_order, method_pool):
+    """L10: assemble a class from latest method sources across contexts.
+    method_pool: {method: [(ts, src, prov)]}. Returns (src, used, gaps)."""
+    parts, used, gaps = [f"class {name}:"], {}, []
+    for m in method_order:
+        cands = method_pool.get(m, [])
+        if not cands:
+            gaps.append(m)
+            continue
+        ts, src, prov = max(cands, key=lambda x: x[0])
+        parts.append(src)
+        used[m] = prov
+    return "\n\n".join(parts) + "\n", used, gaps
 
 def iter_messages(store_dir):
     seen = set()
