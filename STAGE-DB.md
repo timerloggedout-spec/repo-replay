@@ -1,6 +1,10 @@
 # STAGE-DB — every stage, per file, % by version|method (2026-10-30)
 
-Store: `data/stage_scores.db` (SQLite) via `revwright/stage_db.py`.
+Store: SQLite via `revwright/stage_db.py`. **Databases moved (owner order
+2026-10-30): the DBs live in the PUBLIC data repo `repo-replay-data`
+(`db/stage_scores.db` combined · `db/stage_scores_assistant.db` target ·
+`db/stage_scores_user.db`); raw harvest = encrypted splice at
+`repo-replay-data/sensitive/` (AES-256 ciphertext, owner-held key).
 Row = (file, stage_version, method, item, pct, source). `pct` = similarity
 ×100 (corpus-relative, L7); NULL pct = measured GAP. Every pipeline run
 appends its stage rows (`record_run`); backfill carries only numbers
