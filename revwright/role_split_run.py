@@ -12,7 +12,7 @@ ORACLES = {
 }
 CORPORA = {"assistant": {"ASSISTANT"}, "user": {"USER"}, "combined": None}
 
-def compose_for_target(target, oracle_path, roles, attn_min=2):
+def compose_for_target(target, oracle_path, roles, attn_min=1):  # L12: admission >=1 (v0.7 finding)
     otext = oracle_path.read_text(errors="replace")
     oitems, ohdr = P.top_items(otext)
     omethods = P.method_items(otext)
@@ -89,14 +89,15 @@ def compose_for_target(target, oracle_path, roles, attn_min=2):
     rebuilt = (ohdr.rstrip() + "\n\n" if ohdr.strip() else "") + "\n\n".join(parts[n] for n in oitems if n in parts) + "\n"
     return round(P.sim(rebuilt, otext) * 100, 1), per_item, gaps, index_rows
 
-results = {}
-for corpus, roles in CORPORA.items():
-    db = stage_db.db_for(corpus)
-    for target, opath in ORACLES.items():
-        whole, per_item, gaps, idx = compose_for_target(target, opath, roles)
-        stage_db.record_run(target, "pipeline-v0.6", "role_split_auto", whole,
-                            per_item=per_item, source="ROLE-SPLIT experiment", db_path=db)
-        stage_db.record_index(idx, db_path=db)
-        results[f"{corpus}:{target}"] = {"whole": whole, "gaps": gaps, "index_rows": len(idx)}
-        print(corpus, target, "whole%", whole, "gaps", gaps, "index rows", len(idx))
-(ROOT / "role_split_matrix.json").write_text(json.dumps(results, indent=1))
+if __name__ == '__main__':
+    results = {}
+    for corpus, roles in CORPORA.items():
+        db = stage_db.db_for(corpus)
+        for target, opath in ORACLES.items():
+            whole, per_item, gaps, idx = compose_for_target(target, opath, roles)
+            stage_db.record_run(target, "pipeline-v0.6", "role_split_auto", whole,
+                                per_item=per_item, source="ROLE-SPLIT experiment", db_path=db)
+            stage_db.record_index(idx, db_path=db)
+            results[f"{corpus}:{target}"] = {"whole": whole, "gaps": gaps, "index_rows": len(idx)}
+            print(corpus, target, "whole%", whole, "gaps", gaps, "index rows", len(idx))
+    (ROOT / "role_split_matrix.json").write_text(json.dumps(results, indent=1))
