@@ -25,3 +25,15 @@ Oracle: master `deepcli/deepcli/core.py` (27,618 B, cached locally).
   extractor (`cat > path << MARKER`) ∘ both feed the same recipe chain.
 - Chain for core.py so far: monolith (msg 27) ⇒ split draft (msg 28) ⇒
   [later sessions pending export expansion] ⇒ master (oracle).
+
+## Model correction (owner, 2026-10-30) — read the channels by ROLE
+- A user-pasted `cat` dump is a **confirmation|validation snapshot** of the
+  multi-edit state at that moment — oracle-class evidence for validation
+  tooling ONLY. It does NOT indicate the file was built from the nearby
+  heredoc/sed/awk operations.
+- Heredoc/sed/awk blocks = **proposed operations** (unverified) until a
+  later validation snapshot confirms them.
+- Reframed numbers: msg 27 dump = validated state then; msg 28 heredoc
+  `core.py` (0.552 vs master) = a proposal, validated only by later dumps.
+Extractor v0.2 classification updated: dump ⇒ validation_snapshot;
+heredoc/sed/awk ⇒ proposed_op (pending validation).
