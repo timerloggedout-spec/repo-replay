@@ -17,16 +17,53 @@ import stage_db
 
 RAW = "https://raw.githubusercontent.com/timerloggedout-spec/termux-monorepo/master/"
 
-def oracle_for(target):
-    try:
-        with urllib.request.urlopen(RAW + target, timeout=20) as r:
-            return r.read().decode(errors="replace")
-    except Exception:
-        return None
+class FetchFail(Exception):
+    pass
+
+def oracle_for(path):
+    """Returns text; raises FetchFail on transient errors; None on true 404."""
+    import urllib.error, time
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(RAW + path, timeout=20) as r:
+                return r.read().decode(errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if attempt == 1:
+                raise FetchFail(str(e.code))
+        except Exception as e:
+            if attempt == 1:
+                raise FetchFail(type(e).__name__)
+        time.sleep(2)
+
+def load_tree(path_arg):
+    """Full master tree paths: from a file (workflow git ls-tree) or the
+    saved recon snapshot fallback. Returns list[str]."""
+    if path_arg and Path(path_arg).exists():
+        return [l.strip() for l in Path(path_arg).read_text().splitlines() if l.strip()]
+    snap = Path(__file__).resolve().parent.parent / "tree.txt"
+    if snap.exists():
+        return [l.strip() for l in snap.read_text().splitlines() if l.strip()]
+    return []
+
+def resolve(target, tree, by_base):
+    """hint -> master path: exact, else unique basename, else None."""
+    if target in tree:
+        return target, "exact"
+    cands = by_base.get(target.split("/")[-1], [])
+    if len(cands) == 1:
+        return cands[0], "basename_unique"
+    return None, "ambiguous" if cands else "absent"
 
 def main():
     store = Path(sys.argv[1]); db_path = Path(sys.argv[2])
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    tree = load_tree(sys.argv[4] if len(sys.argv) > 4 else None)
+    tree_set = set(tree)
+    by_base = {}
+    for tp in tree:
+        by_base.setdefault(tp.split("/")[-1], []).append(tp)
     # single corpus pass: targets from every hint (any role); pools ASSISTANT only
     by_name, by_hint = {}, {}
     wholes = {}
@@ -58,10 +95,20 @@ def main():
     summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "rows": []}
     con = stage_db.connect(db_path)
     for target in targets:
-        otext = oracle_for(target)
+        resolved, how = resolve(target, tree_set, by_base)
+        if resolved is None:
+            summary["no_oracle"] += 1
+            stage_db.record(con, [(target, "remote-v2", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}")])
+            continue
+        try:
+            otext = oracle_for(resolved)
+        except FetchFail:
+            summary["fetch_fail"] = summary.get("fetch_fail", 0) + 1
+            stage_db.record(con, [(target, "remote-v2", "actions_full_census", "WHOLE", None, "FETCH_FAIL")])
+            continue
         if otext is None:
             summary["no_oracle"] += 1
-            stage_db.record(con, [(target, "remote-v1", "actions_full_census", "WHOLE", None, "NO_ORACLE")])
+            stage_db.record(con, [(target, "remote-v2", "actions_full_census", "WHOLE", None, "NO_ORACLE:404")])
             continue
         oitems, ohdr = P.top_items(otext)
         if not oitems:
@@ -98,16 +145,16 @@ def main():
             except Exception:
                 pass
         pct = round(P.sim(best, otext) * 100, 1)
-        rows = [(target, "remote-v1", "actions_full_census", "WHOLE", pct, "remote run")]
+        rows = [(target, "remote-v2", "actions_full_census", "WHOLE", pct, f"remote run resolved={how}")]
         for n in oitems:
-            rows.append((target, "remote-v1", "actions_full_census", n,
+            rows.append((target, "remote-v2", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
-        summary["rows"].append({"target": target, "pct": pct, "gaps": len(gaps)})
+        summary["rows"].append({"target": target, "resolved": resolved, "how": how, "pct": pct, "gaps": len(gaps)})
     con.close()
     Path("remote_summary.json").write_text(json.dumps(summary, indent=1))
-    print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']}")
+    print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']} fetch_fail={summary.get('fetch_fail', 0)}")
 
 if __name__ == "__main__":
     main()
