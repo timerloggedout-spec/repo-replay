@@ -14,6 +14,13 @@ v7: pack v3 is a git-objects pack (the shallow .git store itself; the
 242-branch full-tree shape failed on scale) — when v2_dir is a git repo,
 index via git ls-tree per branch ref (master preferred) and read blobs
 on demand via git show. Filesystem packs (v6/v1) unchanged.
+v8: whole-file fallback. NO_ORACLE splits into oracle_miss (resolved
+path fetched nothing — gitlinks et al.) vs the no-items class (oracle
+present, zero top-level items: md/sh/dotfiles/all-top-level py). The
+no-items class is now SCORED whole-file: assistant raw hint texts are
+pooled per basename (validation snapshots excluded, L2) and the latest
+is similarity-scored against the oracle (validator arbitrates across
+oracle candidates). Session-evidence instrument widens to raw presence.
 
 GitHub Actions (repo-replay-data): corpus decrypted from the public
 encrypted splice via repo secret; pools built in ONE pass; every census
@@ -21,7 +28,7 @@ target composed + scored vs validators: V1 = termux-monorepo master
 (exact -> unique basename -> AMBIGUOUS arbitration by validator best-of),
 V2 = GitLab earlier copy for the absent class. Fetch splits 404
 (NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
-stage DB (remote-v7 | actions_full_census).
+stage DB (remote-v8 | actions_full_census).
 
 Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file] [v2_dir]
 v2_dir = local GitLab snapshot clone (tree+blob pack); absent-class
@@ -138,7 +145,7 @@ def main():
     by_base = {}
     for tp in tree:
         by_base.setdefault(tp.split("/")[-1], []).append(tp)
-    by_name, by_hint, wholes = {}, {}, {}
+    by_name, by_hint, wholes, raw = {}, {}, {}, {}
     target_set = set()
     for fname, ts, mid, role, content in P.iter_messages(store):
         for channel, hint, text in P.channels(content):
@@ -151,6 +158,8 @@ def main():
         for channel, hint, text in P.channels(content):
             if channel == "validation_snapshot":
                 continue
+            if hint:
+                raw.setdefault(hint.split("/")[-1], []).append((ts, text))
             items, _ = P.items_of(text)
             if not items:
                 continue
@@ -164,13 +173,13 @@ def main():
     targets = sorted(target_set)
     if limit:
         targets = targets[:limit]
-    summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "fetch_fail": 0, "rows": [], "gap_session": {"present": 0, "absent": 0}}
+    summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "fetch_fail": 0, "rows": [], "gap_session": {"present": 0, "absent": 0}, "whole_scored": 0}
     con = stage_db.connect(db_path)
     for target in targets:
         resolved, how, cands = resolve(target, tree_set, by_base)
         base0 = target.split("/")[-1]
         ev_items = {n for (b, n) in by_hint if b == base0}
-        session_state = "present" if (ev_items or wholes.get(base0)) else "absent"
+        session_state = "present" if (ev_items or wholes.get(base0) or raw.get(base0)) else "absent"
         oracle_texts = []
         try:
             if resolved is not None:
@@ -210,7 +219,7 @@ def main():
         except FetchFail:
             summary["fetch_fail"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v7", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v8", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "FETCH_FAIL", "session": session_state})
             continue
         variants = []
@@ -219,10 +228,25 @@ def main():
             if oi:
                 variants.append((rp, otext, oi, oh, src))
         if not variants:
+            if oracle_texts and raw.get(base0):
+                latest = max(raw[base0], key=lambda x: x[0])[1]
+                bestw = None
+                for rp2, otext2, src2 in oracle_texts:
+                    pw = round(P.sim(latest, otext2) * 100, 1)
+                    if bestw is None or pw > bestw[0]:
+                        bestw = (pw, rp2, src2)
+                pw, rp2, src2 = bestw
+                stage_db.record(con, [(target, "remote-v8", "actions_full_census", "WHOLE", pw,
+                    f"remote run whole resolved={rp2} via={how}/whole:{src2}")])
+                summary["scored"] += 1
+                summary["whole_scored"] += 1
+                summary["rows"].append({"target": target, "resolved": rp2, "how": how + "/whole", "pct": pw, "gaps": 0})
+                continue
             summary["no_oracle"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v7", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:session={session_state}")])
-            summary["rows"].append({"target": target, "how": how, "gap": "NO_ORACLE", "session": session_state})
+            sub = "no_items" if oracle_texts else "oracle_miss"
+            stage_db.record(con, [(target, "remote-v8", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:{sub}:session={session_state}")])
+            summary["rows"].append({"target": target, "how": how, "gap": "NO_ORACLE", "sub": sub, "session": session_state})
             continue
         best = None
         for rp, otext, oitems, ohdr, src in variants:
@@ -238,10 +262,10 @@ def main():
             if best is None or pct > best[0]:
                 best = (pct, rp, oitems, parts, gaps, src)
         pct, rp, oitems, parts, gaps, src = best
-        rows = [(target, "remote-v7", "actions_full_census", "WHOLE", pct,
+        rows = [(target, "remote-v8", "actions_full_census", "WHOLE", pct,
                  f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v7", "actions_full_census", n,
+            rows.append((target, "remote-v8", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
