@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""RevWright remote run — EVERY file, assistant-only corpus, single pass.
+"""RevWright remote run v3 — EVERY file, assistant-only corpus, single pass.
 
-Designed for GitHub Actions (repo-replay-data workflow): the corpus is
-decrypted from the public encrypted splice using the repo secret, pools
-are built in ONE corpus pass, then every census target is composed and
-scored against its termux-monorepo master oracle (validator). Rows land
-in the assistant stage DB (stage remote-v1 | actions_full_census).
+GitHub Actions (repo-replay-data): corpus decrypted from the public
+encrypted splice via repo secret; pools built in ONE pass; every census
+target composed + scored vs validators: V1 = termux-monorepo master
+(exact -> unique basename -> AMBIGUOUS arbitration by validator best-of),
+V2 = GitLab earlier copy for the absent class. Fetch splits 404
+(NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
+stage DB (remote-v3 | actions_full_census).
 
-Usage: remote_run.py <store_dir> <db_path> [limit]
+Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file]
 """
-import sys, json, urllib.request
+import sys, json, ast, time, urllib.request, urllib.error
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pipeline as P
 import stage_db
 
 RAW = "https://raw.githubusercontent.com/timerloggedout-spec/termux-monorepo/master/"
+GITLAB_RAW = "https://gitlab.com/a-group2180532/termux-monorepo/-/raw/main/"
 
 class FetchFail(Exception):
     pass
 
-def oracle_for(path):
-    """Returns text; raises FetchFail on transient errors; None on true 404."""
-    import urllib.error, time
+def fetch(url):
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(RAW + path, timeout=20) as r:
+            with urllib.request.urlopen(url, timeout=20) as r:
                 return r.read().decode(errors="replace")
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -38,23 +39,46 @@ def oracle_for(path):
         time.sleep(2)
 
 def load_tree(path_arg):
-    """Full master tree paths: from a file (workflow git ls-tree) or the
-    saved recon snapshot fallback. Returns list[str]."""
     if path_arg and Path(path_arg).exists():
         return [l.strip() for l in Path(path_arg).read_text().splitlines() if l.strip()]
-    snap = Path(__file__).resolve().parent.parent / "tree.txt"
-    if snap.exists():
-        return [l.strip() for l in snap.read_text().splitlines() if l.strip()]
     return []
 
-def resolve(target, tree, by_base):
-    """hint -> master path: exact, else unique basename, else None."""
-    if target in tree:
-        return target, "exact"
+def resolve(target, tree_set, by_base):
+    if target in tree_set:
+        return target, "exact", [target]
     cands = by_base.get(target.split("/")[-1], [])
     if len(cands) == 1:
-        return cands[0], "basename_unique"
-    return None, "ambiguous" if cands else "absent"
+        return cands[0], "basename_unique", cands
+    if cands:
+        return None, "ambiguous", cands[:4]
+    return None, "absent", []
+
+def compose_for(oitems, ohdr, pool, wholes_base):
+    composed, used, gaps = P.compose_latest(pool, list(oitems))
+    parts = {n: max(pool[n], key=lambda x: x[0])[1] for n in used}
+    best = composed
+    if wholes_base:
+        skel = max(wholes_base, key=lambda x: x[0])[1]
+        try:
+            tree = ast.parse(skel)
+            lines = skel.split("\n"); offs = [0]
+            for ln in lines: offs.append(offs[-1] + len(ln) + 1)
+            out, last, present = [], 0, set()
+            for node in tree.body:
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    s = offs[node.lineno - 1]
+                    e = offs[node.end_lineno] if node.end_lineno < len(offs) else len(skel)
+                    out.append(skel[last:s]); out.append(parts.get(node.name, skel[s:e]))
+                    last = e; present.add(node.name)
+            out.append(skel[last:])
+            miss = [n for n in parts if n not in present]
+            if miss: out.append("\n\n" + "\n\n".join(parts[n] for n in miss) + "\n")
+            sk = "".join(out)
+            if P.sim(sk, compose_for.oracle_text) > P.sim(composed, compose_for.oracle_text):
+                best = sk
+        except Exception:
+            pass
+    return best, parts, gaps
 
 def main():
     store = Path(sys.argv[1]); db_path = Path(sys.argv[2])
@@ -64,9 +88,7 @@ def main():
     by_base = {}
     for tp in tree:
         by_base.setdefault(tp.split("/")[-1], []).append(tp)
-    # single corpus pass: targets from every hint (any role); pools ASSISTANT only
-    by_name, by_hint = {}, {}
-    wholes = {}
+    by_name, by_hint, wholes = {}, {}, {}
     target_set = set()
     for fname, ts, mid, role, content in P.iter_messages(store):
         for channel, hint, text in P.channels(content):
@@ -92,69 +114,64 @@ def main():
     targets = sorted(target_set)
     if limit:
         targets = targets[:limit]
-    summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "rows": []}
+    summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "fetch_fail": 0, "rows": []}
     con = stage_db.connect(db_path)
     for target in targets:
-        resolved, how = resolve(target, tree_set, by_base)
-        if resolved is None:
-            summary["no_oracle"] += 1
-            stage_db.record(con, [(target, "remote-v2", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}")])
-            continue
+        resolved, how, cands = resolve(target, tree_set, by_base)
+        oracle_texts = []
         try:
-            otext = oracle_for(resolved)
+            if resolved is not None:
+                t = fetch(RAW + resolved)
+                if t is not None:
+                    oracle_texts = [(resolved, t, "v1")]
+            elif how == "ambiguous":
+                for cand in cands:
+                    t = fetch(RAW + cand)
+                    if t is not None:
+                        oracle_texts.append((cand, t, "v1"))
+            elif how == "absent":
+                t = fetch(GITLAB_RAW + target)
+                if t is not None:
+                    oracle_texts = [(target, t, "v2")]
+                    how = "v2_gitlab"
         except FetchFail:
-            summary["fetch_fail"] = summary.get("fetch_fail", 0) + 1
-            stage_db.record(con, [(target, "remote-v2", "actions_full_census", "WHOLE", None, "FETCH_FAIL")])
+            summary["fetch_fail"] += 1
+            stage_db.record(con, [(target, "remote-v3", "actions_full_census", "WHOLE", None, "FETCH_FAIL")])
             continue
-        if otext is None:
+        variants = []
+        for rp, otext, src in oracle_texts:
+            oi, oh = P.top_items(otext)
+            if oi:
+                variants.append((rp, otext, oi, oh, src))
+        if not variants:
             summary["no_oracle"] += 1
-            stage_db.record(con, [(target, "remote-v2", "actions_full_census", "WHOLE", None, "NO_ORACLE:404")])
+            stage_db.record(con, [(target, "remote-v3", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}")])
             continue
-        oitems, ohdr = P.top_items(otext)
-        if not oitems:
-            summary["no_oracle"] += 1
-            continue
-        base = target.split("/")[-1]
-        pool = {}
-        for name in oitems:
-            cands = by_hint.get((base, name)) or by_name.get(name) or []
-            if cands:
-                pool[name] = [(ts, src, ("", "", "")) for ts, src in cands]
-        composed, used, gaps = P.compose_latest(pool, list(oitems))
-        parts = {n: max(pool[n], key=lambda x: x[0])[1] for n in used}
-        # L13 skeleton arbitration for fn-dominant files
-        best = composed
-        if wholes.get(base):
-            skel = max(wholes[base], key=lambda x: x[0])[1]
-            try:
-                import ast
-                tree = ast.parse(skel)
-                lines = skel.split("\n"); offs = [0]
-                for ln in lines: offs.append(offs[-1] + len(ln) + 1)
-                out, last, present = [], 0, set()
-                for node in tree.body:
-                    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                        s = offs[node.lineno - 1]; e = offs[node.end_lineno] if node.end_lineno < len(offs) else len(skel)
-                        out.append(skel[last:s]); out.append(parts.get(node.name, skel[s:e])); last = e; present.add(node.name)
-                out.append(skel[last:])
-                miss = [n for n in parts if n not in present]
-                if miss: out.append("\n\n" + "\n\n".join(parts[n] for n in miss) + "\n")
-                sk = "".join(out)
-                if P.sim(sk, otext) > P.sim(composed, otext):
-                    best = sk
-            except Exception:
-                pass
-        pct = round(P.sim(best, otext) * 100, 1)
-        rows = [(target, "remote-v2", "actions_full_census", "WHOLE", pct, f"remote run resolved={how}")]
+        best = None
+        for rp, otext, oitems, ohdr, src in variants:
+            base = target.split("/")[-1]
+            pool = {}
+            for name in oitems:
+                cs = by_hint.get((base, name)) or by_name.get(name) or []
+                if cs:
+                    pool[name] = [(ts, s2, ("", "", "")) for ts, s2 in cs]
+            compose_for.oracle_text = otext
+            composed, parts, gaps = compose_for(oitems, ohdr, pool, wholes.get(base))
+            pct = round(P.sim(composed, otext) * 100, 1)
+            if best is None or pct > best[0]:
+                best = (pct, rp, oitems, parts, gaps, src)
+        pct, rp, oitems, parts, gaps, src = best
+        rows = [(target, "remote-v3", "actions_full_census", "WHOLE", pct,
+                 f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v2", "actions_full_census", n,
+            rows.append((target, "remote-v3", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
-        summary["rows"].append({"target": target, "resolved": resolved, "how": how, "pct": pct, "gaps": len(gaps)})
+        summary["rows"].append({"target": target, "resolved": rp, "how": how, "pct": pct, "gaps": len(gaps)})
     con.close()
     Path("remote_summary.json").write_text(json.dumps(summary, indent=1))
-    print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']} fetch_fail={summary.get('fetch_fail', 0)}")
+    print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']} fetch_fail={summary['fetch_fail']}")
 
 if __name__ == "__main__":
     main()
