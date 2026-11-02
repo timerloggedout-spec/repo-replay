@@ -6,6 +6,10 @@ oracle fetch — every target first gets a basename-level session state
 (hint-attributed items or whole-file snapshots in the assistant corpus),
 so gap rows (FETCH_FAIL / NO_ORACLE) carry session=present|absent and
 the absent class is unmasked for L7 gap-cause classification.
+v6 (manager-ruled lever a): the V2 snapshot pack carries ALL GitLab
+branches (tree/<branch>/<path>); indexing strips the branch component,
+prefers master on key conflicts, records the branch per oracle
+(v2_snapshot@<branch>:<sha256[:16]>). Legacy flat packs still index.
 
 GitHub Actions (repo-replay-data): corpus decrypted from the public
 encrypted splice via repo secret; pools built in ONE pass; every census
@@ -13,7 +17,7 @@ target composed + scored vs validators: V1 = termux-monorepo master
 (exact -> unique basename -> AMBIGUOUS arbitration by validator best-of),
 V2 = GitLab earlier copy for the absent class. Fetch splits 404
 (NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
-stage DB (remote-v5 | actions_full_census).
+stage DB (remote-v6 | actions_full_census).
 
 Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file] [v2_dir]
 v2_dir = local GitLab snapshot clone (tree+blob pack); absent-class
@@ -95,10 +99,19 @@ def main():
     v2_dir = Path(sys.argv[5]) if len(sys.argv) > 5 else None
     v2_files = {}
     if v2_dir and v2_dir.exists():
+        branch_mode = (v2_dir / "master").is_dir()
+        entries = []
         for fp in v2_dir.rglob("*"):
             if fp.is_file() and ".git" not in fp.parts:
-                v2_files.setdefault(str(fp.relative_to(v2_dir)), fp)
-        print(f"v2 snapshot: {len(v2_files)} files")
+                rel = fp.relative_to(v2_dir)
+                if branch_mode and len(rel.parts) > 1:
+                    entries.append((rel.parts[0], str(Path(*rel.parts[1:])), fp))
+                else:
+                    entries.append(("root", str(rel), fp))
+        entries.sort(key=lambda e: (e[0] != "master", e[0]))
+        for br, key, fp in entries:
+            v2_files.setdefault(key, (fp, br))
+        print(f"v2 snapshot: {len(v2_files)} files (branch_mode={branch_mode})")
     tree_set = set(tree)
     by_base = {}
     for tp in tree:
@@ -157,9 +170,10 @@ def main():
                     if len(same) == 1:
                         cand = same[0]
                 if cand is not None:
-                    t = v2_files[cand].read_text(errors="replace")
+                    fp, br = v2_files[cand]
+                    t = fp.read_text(errors="replace")
                     h = hashlib.sha256(t.encode()).hexdigest()[:16]
-                    oracle_texts = [(cand, t, f"v2_snapshot:{h}")]
+                    oracle_texts = [(cand, t, f"v2_snapshot@{br}:{h}")]
                     how = "v2_snapshot"
                 else:
                     t = fetch(GITLAB_RAW + target)
@@ -169,7 +183,7 @@ def main():
         except FetchFail:
             summary["fetch_fail"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v5", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v6", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "FETCH_FAIL", "session": session_state})
             continue
         variants = []
@@ -180,7 +194,7 @@ def main():
         if not variants:
             summary["no_oracle"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v5", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v6", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "NO_ORACLE", "session": session_state})
             continue
         best = None
@@ -197,10 +211,10 @@ def main():
             if best is None or pct > best[0]:
                 best = (pct, rp, oitems, parts, gaps, src)
         pct, rp, oitems, parts, gaps, src = best
-        rows = [(target, "remote-v5", "actions_full_census", "WHOLE", pct,
+        rows = [(target, "remote-v6", "actions_full_census", "WHOLE", pct,
                  f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v5", "actions_full_census", n,
+            rows.append((target, "remote-v6", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
