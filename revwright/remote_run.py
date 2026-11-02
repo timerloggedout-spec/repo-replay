@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""RevWright remote run v3 — EVERY file, assistant-only corpus, single pass.
+"""RevWright remote run v5 — EVERY file, assistant-only corpus, single pass.
+
+v5 (manager-ruled lever b): session-evidence is measured BEFORE the
+oracle fetch — every target first gets a basename-level session state
+(hint-attributed items or whole-file snapshots in the assistant corpus),
+so gap rows (FETCH_FAIL / NO_ORACLE) carry session=present|absent and
+the absent class is unmasked for L7 gap-cause classification.
 
 GitHub Actions (repo-replay-data): corpus decrypted from the public
 encrypted splice via repo secret; pools built in ONE pass; every census
@@ -7,7 +13,7 @@ target composed + scored vs validators: V1 = termux-monorepo master
 (exact -> unique basename -> AMBIGUOUS arbitration by validator best-of),
 V2 = GitLab earlier copy for the absent class. Fetch splits 404
 (NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
-stage DB (remote-v3 | actions_full_census).
+stage DB (remote-v5 | actions_full_census).
 
 Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file] [v2_dir]
 v2_dir = local GitLab snapshot clone (tree+blob pack); absent-class
@@ -123,10 +129,13 @@ def main():
     targets = sorted(target_set)
     if limit:
         targets = targets[:limit]
-    summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "fetch_fail": 0, "rows": []}
+    summary = {"targets": len(targets), "scored": 0, "no_oracle": 0, "fetch_fail": 0, "rows": [], "gap_session": {"present": 0, "absent": 0}}
     con = stage_db.connect(db_path)
     for target in targets:
         resolved, how, cands = resolve(target, tree_set, by_base)
+        base0 = target.split("/")[-1]
+        ev_items = {n for (b, n) in by_hint if b == base0}
+        session_state = "present" if (ev_items or wholes.get(base0)) else "absent"
         oracle_texts = []
         try:
             if resolved is not None:
@@ -159,7 +168,9 @@ def main():
                         how = "v2_gitlab"
         except FetchFail:
             summary["fetch_fail"] += 1
-            stage_db.record(con, [(target, "remote-v4", "actions_full_census", "WHOLE", None, "FETCH_FAIL")])
+            summary["gap_session"][session_state] += 1
+            stage_db.record(con, [(target, "remote-v5", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
+            summary["rows"].append({"target": target, "how": how, "gap": "FETCH_FAIL", "session": session_state})
             continue
         variants = []
         for rp, otext, src in oracle_texts:
@@ -168,7 +179,9 @@ def main():
                 variants.append((rp, otext, oi, oh, src))
         if not variants:
             summary["no_oracle"] += 1
-            stage_db.record(con, [(target, "remote-v4", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}")])
+            summary["gap_session"][session_state] += 1
+            stage_db.record(con, [(target, "remote-v5", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:session={session_state}")])
+            summary["rows"].append({"target": target, "how": how, "gap": "NO_ORACLE", "session": session_state})
             continue
         best = None
         for rp, otext, oitems, ohdr, src in variants:
@@ -184,17 +197,17 @@ def main():
             if best is None or pct > best[0]:
                 best = (pct, rp, oitems, parts, gaps, src)
         pct, rp, oitems, parts, gaps, src = best
-        rows = [(target, "remote-v4", "actions_full_census", "WHOLE", pct,
+        rows = [(target, "remote-v5", "actions_full_census", "WHOLE", pct,
                  f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v4", "actions_full_census", n,
+            rows.append((target, "remote-v5", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
         summary["rows"].append({"target": target, "resolved": rp, "how": how, "pct": pct, "gaps": len(gaps)})
     con.close()
     Path("remote_summary.json").write_text(json.dumps(summary, indent=1))
-    print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']} fetch_fail={summary['fetch_fail']}")
+    print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']} fetch_fail={summary['fetch_fail']} gap_session={summary['gap_session']}")
 
 if __name__ == "__main__":
     main()
