@@ -21,6 +21,11 @@ no-items class is now SCORED whole-file: assistant raw hint texts are
 pooled per basename (validation snapshots excluded, L2) and the latest
 is similarity-scored against the oracle (validator arbitrates across
 oracle candidates). Session-evidence instrument widens to raw presence.
+v9: gap-fill export. Absent-class targets WITH session content (149 at
+v8) are RECONSTRUCTED into gapfill_dir (argv[6]): latest whole snapshot
+> latest raw text > item-compose of hint-attributed items; MANIFEST.json
+records {target, method, bytes, sha256, versions} per file. Unscored by
+design — no oracle exists for this class anywhere.
 
 GitHub Actions (repo-replay-data): corpus decrypted from the public
 encrypted splice via repo secret; pools built in ONE pass; every census
@@ -28,7 +33,7 @@ target composed + scored vs validators: V1 = termux-monorepo master
 (exact -> unique basename -> AMBIGUOUS arbitration by validator best-of),
 V2 = GitLab earlier copy for the absent class. Fetch splits 404
 (NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
-stage DB (remote-v8 | actions_full_census).
+stage DB (remote-v9 | actions_full_census).
 
 Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file] [v2_dir]
 v2_dir = local GitLab snapshot clone (tree+blob pack); absent-class
@@ -108,6 +113,8 @@ def main():
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     tree = load_tree(sys.argv[4] if len(sys.argv) > 4 else None)
     v2_dir = Path(sys.argv[5]) if len(sys.argv) > 5 else None
+    gapfill_dir = Path(sys.argv[6]) if len(sys.argv) > 6 else None
+    gapfill_rows = []
     v2_files = {}
     v2_git = None
     if v2_dir and (v2_dir / ".git").exists():
@@ -219,8 +226,31 @@ def main():
         except FetchFail:
             summary["fetch_fail"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v8", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v9", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "FETCH_FAIL", "session": session_state})
+            if gapfill_dir is not None and how == "absent" and session_state == "present":
+                import hashlib as _hl
+                text, method, nver = None, None, 0
+                if wholes.get(base0):
+                    text = max(wholes[base0], key=lambda x: x[0])[1]
+                    method, nver = "whole_snapshot", len(wholes[base0])
+                elif raw.get(base0):
+                    text = max(raw[base0], key=lambda x: x[0])[1]
+                    method, nver = "raw_latest", len(raw[base0])
+                elif ev_items:
+                    pool = {}
+                    for n2 in ev_items:
+                        cs = by_hint.get((base0, n2)) or []
+                        if cs:
+                            pool[n2] = [(ts2, s2, ("", "", "")) for ts2, s2 in cs]
+                    text, _u, _g = P.compose_latest(pool, sorted(ev_items))
+                    method, nver = "item_compose", len(ev_items)
+                if text:
+                    out = gapfill_dir / target
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_text(text)
+                    gapfill_rows.append({"target": target, "method": method, "versions": nver,
+                                         "bytes": len(text.encode()), "sha256": _hl.sha256(text.encode()).hexdigest()})
             continue
         variants = []
         for rp, otext, src in oracle_texts:
@@ -236,7 +266,7 @@ def main():
                     if bestw is None or pw > bestw[0]:
                         bestw = (pw, rp2, src2)
                 pw, rp2, src2 = bestw
-                stage_db.record(con, [(target, "remote-v8", "actions_full_census", "WHOLE", pw,
+                stage_db.record(con, [(target, "remote-v9", "actions_full_census", "WHOLE", pw,
                     f"remote run whole resolved={rp2} via={how}/whole:{src2}")])
                 summary["scored"] += 1
                 summary["whole_scored"] += 1
@@ -245,7 +275,7 @@ def main():
             summary["no_oracle"] += 1
             summary["gap_session"][session_state] += 1
             sub = "no_items" if oracle_texts else "oracle_miss"
-            stage_db.record(con, [(target, "remote-v8", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:{sub}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v9", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:{sub}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "NO_ORACLE", "sub": sub, "session": session_state})
             continue
         best = None
@@ -262,15 +292,20 @@ def main():
             if best is None or pct > best[0]:
                 best = (pct, rp, oitems, parts, gaps, src)
         pct, rp, oitems, parts, gaps, src = best
-        rows = [(target, "remote-v8", "actions_full_census", "WHOLE", pct,
+        rows = [(target, "remote-v9", "actions_full_census", "WHOLE", pct,
                  f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v8", "actions_full_census", n,
+            rows.append((target, "remote-v9", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
         summary["rows"].append({"target": target, "resolved": rp, "how": how, "pct": pct, "gaps": len(gaps)})
     con.close()
+    if gapfill_dir is not None:
+        gapfill_dir.mkdir(parents=True, exist_ok=True)
+        (gapfill_dir / "MANIFEST.json").write_text(json.dumps(
+            {"stage": "remote-v9", "files": len(gapfill_rows), "rows": gapfill_rows}, indent=1))
+        summary["gapfill"] = len(gapfill_rows)
     Path("remote_summary.json").write_text(json.dumps(summary, indent=1))
     print(f"targets={summary['targets']} scored={summary['scored']} no_oracle={summary['no_oracle']} fetch_fail={summary['fetch_fail']} gap_session={summary['gap_session']}")
 
