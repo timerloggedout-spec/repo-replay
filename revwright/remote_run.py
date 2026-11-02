@@ -9,7 +9,9 @@ V2 = GitLab earlier copy for the absent class. Fetch splits 404
 (NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
 stage DB (remote-v3 | actions_full_census).
 
-Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file]
+Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file] [v2_dir]
+v2_dir = local GitLab snapshot clone (tree+blob pack); absent-class
+oracle read from disk, sha256 recorded (hash-verified fill_gap source).
 """
 import sys, json, ast, time, urllib.request, urllib.error
 from pathlib import Path
@@ -84,6 +86,13 @@ def main():
     store = Path(sys.argv[1]); db_path = Path(sys.argv[2])
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     tree = load_tree(sys.argv[4] if len(sys.argv) > 4 else None)
+    v2_dir = Path(sys.argv[5]) if len(sys.argv) > 5 else None
+    v2_files = {}
+    if v2_dir and v2_dir.exists():
+        for fp in v2_dir.rglob("*"):
+            if fp.is_file() and ".git" not in fp.parts:
+                v2_files.setdefault(str(fp.relative_to(v2_dir)), fp)
+        print(f"v2 snapshot: {len(v2_files)} files")
     tree_set = set(tree)
     by_base = {}
     for tp in tree:
@@ -130,13 +139,27 @@ def main():
                     if t is not None:
                         oracle_texts.append((cand, t, "v1"))
             elif how == "absent":
-                t = fetch(GITLAB_RAW + target)
-                if t is not None:
-                    oracle_texts = [(target, t, "v2")]
-                    how = "v2_gitlab"
+                import hashlib
+                cand = None
+                if target in v2_files:
+                    cand = target
+                else:
+                    same = [r for r in v2_files if r.split("/")[-1] == target.split("/")[-1]]
+                    if len(same) == 1:
+                        cand = same[0]
+                if cand is not None:
+                    t = v2_files[cand].read_text(errors="replace")
+                    h = hashlib.sha256(t.encode()).hexdigest()[:16]
+                    oracle_texts = [(cand, t, f"v2_snapshot:{h}")]
+                    how = "v2_snapshot"
+                else:
+                    t = fetch(GITLAB_RAW + target)
+                    if t is not None:
+                        oracle_texts = [(target, t, "v2")]
+                        how = "v2_gitlab"
         except FetchFail:
             summary["fetch_fail"] += 1
-            stage_db.record(con, [(target, "remote-v3", "actions_full_census", "WHOLE", None, "FETCH_FAIL")])
+            stage_db.record(con, [(target, "remote-v4", "actions_full_census", "WHOLE", None, "FETCH_FAIL")])
             continue
         variants = []
         for rp, otext, src in oracle_texts:
@@ -145,7 +168,7 @@ def main():
                 variants.append((rp, otext, oi, oh, src))
         if not variants:
             summary["no_oracle"] += 1
-            stage_db.record(con, [(target, "remote-v3", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}")])
+            stage_db.record(con, [(target, "remote-v4", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}")])
             continue
         best = None
         for rp, otext, oitems, ohdr, src in variants:
@@ -161,10 +184,10 @@ def main():
             if best is None or pct > best[0]:
                 best = (pct, rp, oitems, parts, gaps, src)
         pct, rp, oitems, parts, gaps, src = best
-        rows = [(target, "remote-v3", "actions_full_census", "WHOLE", pct,
+        rows = [(target, "remote-v4", "actions_full_census", "WHOLE", pct,
                  f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v3", "actions_full_census", n,
+            rows.append((target, "remote-v4", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
