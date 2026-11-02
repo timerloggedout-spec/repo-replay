@@ -10,6 +10,10 @@ v6 (manager-ruled lever a): the V2 snapshot pack carries ALL GitLab
 branches (tree/<branch>/<path>); indexing strips the branch component,
 prefers master on key conflicts, records the branch per oracle
 (v2_snapshot@<branch>:<sha256[:16]>). Legacy flat packs still index.
+v7: pack v3 is a git-objects pack (the shallow .git store itself; the
+242-branch full-tree shape failed on scale) — when v2_dir is a git repo,
+index via git ls-tree per branch ref (master preferred) and read blobs
+on demand via git show. Filesystem packs (v6/v1) unchanged.
 
 GitHub Actions (repo-replay-data): corpus decrypted from the public
 encrypted splice via repo secret; pools built in ONE pass; every census
@@ -17,7 +21,7 @@ target composed + scored vs validators: V1 = termux-monorepo master
 (exact -> unique basename -> AMBIGUOUS arbitration by validator best-of),
 V2 = GitLab earlier copy for the absent class. Fetch splits 404
 (NO_ORACLE) from transient (FETCH_FAIL, retry x2). Rows -> assistant
-stage DB (remote-v6 | actions_full_census).
+stage DB (remote-v7 | actions_full_census).
 
 Usage: remote_run.py <store_dir> <db_path> [limit] [tree_file] [v2_dir]
 v2_dir = local GitLab snapshot clone (tree+blob pack); absent-class
@@ -98,7 +102,25 @@ def main():
     tree = load_tree(sys.argv[4] if len(sys.argv) > 4 else None)
     v2_dir = Path(sys.argv[5]) if len(sys.argv) > 5 else None
     v2_files = {}
-    if v2_dir and v2_dir.exists():
+    v2_git = None
+    if v2_dir and (v2_dir / ".git").exists():
+        import subprocess
+        v2_git = str(v2_dir)
+        def gitout(*args):
+            r = subprocess.run(["git", "-c", "safe.directory=*", "-C", v2_git, *args], capture_output=True)
+            return r.stdout.decode(errors="replace")
+        refs = [l for l in gitout("for-each-ref", "--format=%(refname)", "refs/remotes/gitlab").splitlines() if l]
+        entries = []
+        for ref in refs:
+            br = ref[len("refs/remotes/gitlab/"):]
+            for p in gitout("ls-tree", "-r", "--name-only", ref).splitlines():
+                if p:
+                    entries.append((br, p))
+        entries.sort(key=lambda e: (e[0] != "master", e[0]))
+        for br, p in entries:
+            v2_files.setdefault(p, (f"git:{br}", br))
+        print(f"v2 snapshot (git-objects): {len(v2_files)} files across {len(refs)} branches")
+    elif v2_dir and v2_dir.exists():
         branch_mode = (v2_dir / "master").is_dir()
         entries = []
         for fp in v2_dir.rglob("*"):
@@ -170,8 +192,13 @@ def main():
                     if len(same) == 1:
                         cand = same[0]
                 if cand is not None:
-                    fp, br = v2_files[cand]
-                    t = fp.read_text(errors="replace")
+                    loc, br = v2_files[cand]
+                    if v2_git:
+                        import subprocess
+                        rr = subprocess.run(["git", "-c", "safe.directory=*", "-C", v2_git, "show", f"refs/remotes/gitlab/{br}:{cand}"], capture_output=True)
+                        t = rr.stdout.decode(errors="replace")
+                    else:
+                        t = loc.read_text(errors="replace")
                     h = hashlib.sha256(t.encode()).hexdigest()[:16]
                     oracle_texts = [(cand, t, f"v2_snapshot@{br}:{h}")]
                     how = "v2_snapshot"
@@ -183,7 +210,7 @@ def main():
         except FetchFail:
             summary["fetch_fail"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v6", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v7", "actions_full_census", "WHOLE", None, f"FETCH_FAIL:{how}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "FETCH_FAIL", "session": session_state})
             continue
         variants = []
@@ -194,7 +221,7 @@ def main():
         if not variants:
             summary["no_oracle"] += 1
             summary["gap_session"][session_state] += 1
-            stage_db.record(con, [(target, "remote-v6", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:session={session_state}")])
+            stage_db.record(con, [(target, "remote-v7", "actions_full_census", "WHOLE", None, f"NO_ORACLE:{how}:session={session_state}")])
             summary["rows"].append({"target": target, "how": how, "gap": "NO_ORACLE", "session": session_state})
             continue
         best = None
@@ -211,10 +238,10 @@ def main():
             if best is None or pct > best[0]:
                 best = (pct, rp, oitems, parts, gaps, src)
         pct, rp, oitems, parts, gaps, src = best
-        rows = [(target, "remote-v6", "actions_full_census", "WHOLE", pct,
+        rows = [(target, "remote-v7", "actions_full_census", "WHOLE", pct,
                  f"remote run resolved={rp} via={how}/{src}")]
         for n in oitems:
-            rows.append((target, "remote-v6", "actions_full_census", n,
+            rows.append((target, "remote-v7", "actions_full_census", n,
                          round(P.sim(parts[n], oitems[n]) * 100, 1) if n in parts else None, "remote run"))
         stage_db.record(con, rows)
         summary["scored"] += 1
